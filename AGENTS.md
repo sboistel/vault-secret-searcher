@@ -13,11 +13,12 @@ A Go CLI tool that recursively searches HashiCorp Vault KV secrets for matching 
 One command: `search` (default, no need to type it).
 
 ```bash
-vault-secret-searcher -s redis              # search keys in secret/
-vault-secret-searcher -v -s redis            # search values
-vault-secret-searcher -p secret/infra/ -s pg # custom path
-vault-secret-searcher -l -s redis            # OIDC login first
-vault-secret-searcher -d -s redis            # debug logging
+vault-secret-searcher -k redis                # search keys in secret/
+vault-secret-searcher -v "secret_value"       # search values
+vault-secret-searcher -p secret/infra/ -k pg  # custom path
+vault-secret-searcher -l -k redis             # OIDC login first
+vault-secret-searcher -d -k redis             # debug logging
+vault-secret-searcher -n my-namespace -k redis # specify namespace
 ```
 
 ## Development

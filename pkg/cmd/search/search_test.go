@@ -3,16 +3,27 @@ package search
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
+
+	"vault-secret-searcher/pkg/client/vault"
 )
 
 type mockClient struct {
-	paths   map[string][]string
-	secrets map[string]map[string]any
+	paths     map[string][]string
+	secrets   map[string]map[string]any
+	lookupErr error
+	logins    int
 }
 
-func (m *mockClient) Login() error { return nil }
+func (m *mockClient) Login() error {
+	m.logins++
+	m.lookupErr = nil
+	return nil
+}
+
+func (m *mockClient) LookupToken() error { return m.lookupErr }
 
 func (m *mockClient) ListPath(path string) ([]string, error) {
 	return m.paths[path], nil
@@ -32,9 +43,41 @@ func runCmd(t *testing.T, cmd *Cmd) string {
 	return buf.String()
 }
 
+func TestRun_NamespaceInvalidTokenTriggersLogin(t *testing.T) {
+	client := &mockClient{
+		lookupErr: vault.ErrTokenInvalid,
+		secrets:   map[string]map[string]any{"secret/app": {"redis": "x"}},
+	}
+	output := runCmd(t, &Cmd{
+		Keys:      "redis",
+		Path:      "secret/app",
+		Namespace: "my-ns",
+		client:    client,
+	})
+
+	if client.logins != 1 {
+		t.Errorf("expected 1 login, got %d", client.logins)
+	}
+	if !strings.Contains(output, "[my-ns] Found in: secret/app") {
+		t.Errorf("expected match after login, got:\n%s", output)
+	}
+}
+
+func TestRun_InvalidToken(t *testing.T) {
+	cmd := &Cmd{
+		Keys:   "redis",
+		Path:   "secret/",
+		out:    &bytes.Buffer{},
+		client: &mockClient{lookupErr: errors.New("token invalid")},
+	}
+	if err := cmd.Run(context.Background()); err == nil {
+		t.Fatal("expected error for invalid token")
+	}
+}
+
 func TestSearchKeys_CaseInsensitive(t *testing.T) {
 	output := runCmd(t, &Cmd{
-		Search: "redis",
+		Keys: "redis",
 		Path:   "secret/k8s/app1",
 		client: &mockClient{
 			secrets: map[string]map[string]any{
@@ -59,7 +102,7 @@ func TestSearchKeys_CaseInsensitive(t *testing.T) {
 
 func TestSearchKeys_NoMatch(t *testing.T) {
 	output := runCmd(t, &Cmd{
-		Search: "redis",
+		Keys: "redis",
 		Path:   "secret/k8s/app1",
 		client: &mockClient{
 			secrets: map[string]map[string]any{
@@ -77,8 +120,7 @@ func TestSearchKeys_NoMatch(t *testing.T) {
 
 func TestSearchValues_CaseInsensitive(t *testing.T) {
 	output := runCmd(t, &Cmd{
-		Values: true,
-		Search: "redis",
+		Values: "redis",
 		Path:   "secret/k8s/app1",
 		client: &mockClient{
 			secrets: map[string]map[string]any{
@@ -103,7 +145,7 @@ func TestSearchValues_CaseInsensitive(t *testing.T) {
 
 func TestWalkPath_Recursive(t *testing.T) {
 	output := runCmd(t, &Cmd{
-		Search: "redis",
+		Keys: "redis",
 		Path:   "secret/k8s/",
 		client: &mockClient{
 			paths: map[string][]string{
@@ -127,7 +169,7 @@ func TestWalkPath_Recursive(t *testing.T) {
 
 func TestWalkPath_LeafPath(t *testing.T) {
 	output := runCmd(t, &Cmd{
-		Search: "redis",
+		Keys: "redis",
 		Path:   "secret/k8s/single-app",
 		client: &mockClient{
 			paths: map[string][]string{},
@@ -144,8 +186,7 @@ func TestWalkPath_LeafPath(t *testing.T) {
 
 func TestSearchValues_NonStringValues(t *testing.T) {
 	output := runCmd(t, &Cmd{
-		Values: true,
-		Search: "6379",
+		Values: "6379",
 		Path:   "secret/k8s/app1",
 		client: &mockClient{
 			secrets: map[string]map[string]any{
@@ -162,10 +203,10 @@ func TestSearchValues_NonStringValues(t *testing.T) {
 	}
 }
 
-func TestOutputFormat_Header(t *testing.T) {
+func TestOutputFormat_NoHeader(t *testing.T) {
 	output := runCmd(t, &Cmd{
-		Search: "redis",
-		Path:   "secret/k8s/",
+		Keys: "redis",
+		Path: "secret/k8s/",
 		client: &mockClient{
 			secrets: map[string]map[string]any{
 				"secret/k8s/": {},
@@ -173,37 +214,31 @@ func TestOutputFormat_Header(t *testing.T) {
 		},
 	})
 
-	if !strings.Contains(output, "Searching for: 'redis' in keys") {
-		t.Errorf("expected header line, got:\n%s", output)
-	}
-	if !strings.Contains(output, "Vault path: secret/k8s/") {
-		t.Errorf("expected path line, got:\n%s", output)
-	}
-	if !strings.Contains(output, "---") {
-		t.Errorf("expected separator line, got:\n%s", output)
+	if output != "" {
+		t.Errorf("expected no output without matches, got:\n%s", output)
 	}
 }
 
-func TestOutputFormat_HeaderValues(t *testing.T) {
+func TestOutputFormat_NamespacePrefix(t *testing.T) {
 	output := runCmd(t, &Cmd{
-		Values: true,
-		Search: "redis",
-		Path:   "secret/k8s/",
+		Values:    "titi",
+		Path:      "secret/app",
+		Namespace: "my-ns",
 		client: &mockClient{
 			secrets: map[string]map[string]any{
-				"secret/k8s/": {},
+				"secret/app": {"test2": "titi"},
 			},
 		},
 	})
 
-	if !strings.Contains(output, "Searching for: 'redis' in values") {
-		t.Errorf("expected 'in values' header line, got:\n%s", output)
+	if !strings.Contains(output, "[my-ns] Found in: secret/app") {
+		t.Errorf("expected namespace prefix, got:\n%s", output)
 	}
 }
 
 func TestMatchKeys_SortedOutput(t *testing.T) {
 	output := runCmd(t, &Cmd{
-		Search: "redis",
+		Keys: "redis",
 		Path:   "secret/app",
 		client: &mockClient{
 			secrets: map[string]map[string]any{

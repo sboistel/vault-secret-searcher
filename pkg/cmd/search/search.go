@@ -2,6 +2,7 @@ package search
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,18 +20,18 @@ const (
 )
 
 type Cmd struct {
-	Keys   bool   `short:"k" xor:"mode" help:"Search by secret key names (default)"`
-	Values bool   `short:"v" xor:"mode" help:"Search by secret values"`
-	Search string `short:"s" required:"" help:"Term to search for (case-insensitive)"`
-	Path   string `short:"p" default:"secret/" help:"Vault KV path to search recursively"`
-	Login  bool   `short:"l" help:"Run vault OIDC login before searching"`
+	Keys      string `short:"k" xor:"mode" required:"" placeholder:"TERM" help:"Search secret key names (case-insensitive)"`
+	Values    string `short:"v" xor:"mode" required:"" placeholder:"TERM" help:"Search secret values (case-insensitive)"`
+	Path      string `short:"p" default:"secret/" help:"Vault KV path to search recursively"`
+	Login     bool   `short:"l" help:"Run vault OIDC login before searching"`
+	Namespace string `short:"n" env:"VAULT_NAMESPACE" help:"Vault namespace to use"`
 
 	client vault.Client
 	out    io.Writer
 }
 
 func (c *Cmd) mode() string {
-	if c.Values {
+	if c.Values != "" {
 		return modeValues
 	}
 	return modeKeys
@@ -38,7 +39,7 @@ func (c *Cmd) mode() string {
 
 func (c *Cmd) Run(_ context.Context) error {
 	if c.client == nil {
-		c.client = vault.NewCLIClient()
+		c.client = vault.NewCLIClient(c.Namespace)
 	}
 	if c.out == nil {
 		c.out = os.Stdout
@@ -50,9 +51,18 @@ func (c *Cmd) Run(_ context.Context) error {
 		}
 	}
 
-	c.printf("Searching for: '%s' in %s\n", c.Search, c.mode())
-	c.printf("Vault path: %s\n", c.Path)
-	c.printf("---\n")
+	if err := c.client.LookupToken(); err != nil {
+		if c.Namespace == "" || c.Login || !errors.Is(err, vault.ErrTokenInvalid) {
+			return err
+		}
+		log.Debug("Token invalid, requesting login", "namespace", c.Namespace)
+		if err := c.client.Login(); err != nil {
+			return err
+		}
+		if err := c.client.LookupToken(); err != nil {
+			return err
+		}
+	}
 
 	return c.walkPath(c.Path)
 }
@@ -104,7 +114,7 @@ func (c *Cmd) searchSecret(path string) error {
 }
 
 func (c *Cmd) matchKeys(path string, data map[string]any) {
-	term := strings.ToLower(c.Search)
+	term := strings.ToLower(c.Keys)
 	var matches []string
 
 	for key := range data {
@@ -116,7 +126,7 @@ func (c *Cmd) matchKeys(path string, data map[string]any) {
 	sort.Strings(matches)
 
 	if len(matches) > 0 {
-		c.printf("Found in: %s\n", path)
+		c.printFoundIn(path)
 		c.printf("  Matching keys:\n")
 		for _, m := range matches {
 			c.printf("    %s\n", m)
@@ -125,7 +135,7 @@ func (c *Cmd) matchKeys(path string, data map[string]any) {
 }
 
 func (c *Cmd) matchValues(path string, data map[string]any) {
-	term := strings.ToLower(c.Search)
+	term := strings.ToLower(c.Values)
 	var matches []string
 
 	for key, val := range data {
@@ -138,12 +148,19 @@ func (c *Cmd) matchValues(path string, data map[string]any) {
 	sort.Strings(matches)
 
 	if len(matches) > 0 {
-		c.printf("Found in: %s\n", path)
+		c.printFoundIn(path)
 		c.printf("  Matching entries:\n")
 		for _, m := range matches {
 			c.printf("    %s\n", m)
 		}
 	}
+}
+
+func (c *Cmd) printFoundIn(path string) {
+	if c.Namespace != "" {
+		c.printf("[%s] ", c.Namespace)
+	}
+	c.printf("Found in: %s\n", path)
 }
 
 func (c *Cmd) printf(format string, args ...any) {

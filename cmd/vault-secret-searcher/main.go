@@ -14,7 +14,7 @@ func main() {
 
 	pctx := kong.Parse(&cli,
 		kong.Name("vault-secret-searcher"),
-		kong.Description("Search Vault KV secrets for matching keys or values\n\nExamples:\n  vault-secret-searcher -s redis\n  vault-secret-searcher -p secret/infra/ -s redis -v"),
+		kong.Description("Search Vault KV secrets for matching keys or values\n\nExamples:\n  vault-secret-searcher -k redis\n  vault-secret-searcher -p secret/infra/ -v \"secret_value\""),
 	)
 
 	if cli.Debug {
